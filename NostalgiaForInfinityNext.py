@@ -4,6 +4,7 @@ import rapidjson
 import freqtrade.vendor.qtpylib.indicators as qtpylib
 import numpy as np
 import talib.abstract as ta
+import ta as taz
 from freqtrade.misc import json_load
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy import merge_informative_pair, timeframe_to_minutes
@@ -65,12 +66,15 @@ log = logging.getLogger(__name__)
 class NostalgiaForInfinityNext(IStrategy):
     INTERFACE_VERSION = 2
 
-    # # ROI table:
+    # ROI table:
     minimal_roi = {
-        "0": 10,
+        "0": 0.564,
+        "567": 0.273,
+        "2814": 0.12,
+        "7675": 0
     }
 
-    stoploss = -0.99
+    stoploss = -0.238
 
     # Trailing stoploss (not used)
     trailing_stop = False
@@ -113,6 +117,7 @@ class NostalgiaForInfinityNext(IStrategy):
     buy_params = {
         #############
         # Enable/Disable conditions
+        "buy_condition_0_enable": True,
         "buy_condition_1_enable": True,
         "buy_condition_2_enable": True,
         "buy_condition_3_enable": True,
@@ -142,6 +147,10 @@ class NostalgiaForInfinityNext(IStrategy):
         "buy_condition_27_enable": True,
         "buy_condition_28_enable": True,
         #############
+        ##Zeus
+        "buy_cat": "<R",
+        "buy_real": 0.0128,
+        ##
     }
 
     sell_params = {
@@ -156,6 +165,10 @@ class NostalgiaForInfinityNext(IStrategy):
         "sell_condition_7_enable": True,
         "sell_condition_8_enable": True,
         #############
+
+        ##Zeus
+        "sell_cat": "=R",
+        "sell_real": 0.9455,
     }
 
     #############################################################
@@ -1851,6 +1864,16 @@ class NostalgiaForInfinityNext(IStrategy):
 
     hold_trade_ids = hold_trade_ids_profit_ratio = None
 
+    ##Zeus
+    buy_real = DecimalParameter(
+        0.001, 0.999, decimals=4, default=0.11908, space='buy')
+    buy_cat = CategoricalParameter(
+        [">R", "=R", "<R"], default='<R', space='buy')
+    sell_real = DecimalParameter(
+        0.001, 0.999, decimals=4, default=0.0515, space='sell')
+    sell_cat = CategoricalParameter(
+        [">R", "=R", "<R"], default='>R', space='sell')
+    ##
     def load_hold_trades_config(self):
         if self.hold_trade_ids is not None and self.hold_trade_ids_profit_ratio is not None:
             # Already loaded
@@ -2258,6 +2281,25 @@ class NostalgiaForInfinityNext(IStrategy):
         max_profit = ((trade.max_rate - trade.open_rate) / trade.open_rate)
         max_loss = ((trade.open_rate - trade.min_rate) / trade.min_rate)
 
+        IND = 'trend_kst_diff'
+        REAL = self.sell_real.value
+        OPR = self.sell_cat.value
+        DFIND = last_candle[IND]
+        DFINDP = previous_candle_1[IND]
+        # print(DFIND.mean())
+        kst = True
+        if OPR == ">R":
+            kst = DFIND > REAL and not DFINDP > REAL
+            if kst:
+                return "sell_because_down"
+        elif OPR == "=R":
+            kst = np.isclose(DFIND, REAL) and not np.isclose(DFINDP, REAL)
+            if kst:
+                return "sell_because_down"
+        elif OPR == "<R":
+            kst = DFIND < REAL and not DFINDP < REAL
+            if kst:
+                return "sell_because_down"
         if (last_candle is not None) & (previous_candle_1 is not None) & (previous_candle_2 is not None) & (previous_candle_3 is not None) & (previous_candle_4 is not None) & (previous_candle_5 is not None):
             # Over EMA200, main profit targets
             sell, signal_name = self.sell_over_main(current_profit, last_candle)
@@ -2705,6 +2747,37 @@ class NostalgiaForInfinityNext(IStrategy):
         return dataframe
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+
+        #zeus buy
+        dataframe['trend_ichimoku_base'] = taz.trend.ichimoku_base_line(
+            dataframe['high'],
+            dataframe['low'],
+            window1=9,
+            window2=26,
+            visual=False,
+            fillna=False
+        )
+        KST = taz.trend.KSTIndicator(
+            close=dataframe['close'],
+            roc1=10,
+            roc2=15,
+            roc3=20,
+            roc4=30,
+            window1=10,
+            window2=10,
+            window3=10,
+            window4=15,
+            nsig=9,
+            fillna=False
+        )
+
+        dataframe['trend_kst_diff'] = KST.kst_diff()
+        # Normalization
+        tib = dataframe['trend_ichimoku_base']
+        dataframe['trend_ichimoku_base'] = (
+            tib-tib.min())/(tib.max()-tib.min())
+        tkd = dataframe['trend_kst_diff']
+        dataframe['trend_kst_diff'] = (tkd-tkd.min())/(tkd.max()-tkd.min())
         '''
         --> BTC informative (5m/1h)
         ___________________________________________________________________________________________
@@ -2783,6 +2856,28 @@ class NostalgiaForInfinityNext(IStrategy):
                item_buy_protection_list.append(dataframe['btc_not_downtrend_1h'])
             buy_protection_list.append(item_buy_protection_list)
 
+        # Buy Condition #0 Zeus
+        # -----------------------------------------------------------------------------------------
+        if self.buy_params['buy_condition_0_enable']:
+            # Non-Standard protections (add below)
+
+            # Logic
+            item_buy_logic = []
+            IND = 'trend_ichimoku_base'
+            REAL = self.buy_real.value
+            OPR = self.buy_cat.value
+            DFIND = dataframe[IND]
+            # item_buy_logic.append(dataframe['rsi'] < 60.0)
+            item_buy_logic.append(dataframe['volume'] > 0)
+            # print(DFIND.mean())
+            if OPR == ">R":
+                item_buy_logic.append(DFIND > REAL)
+            elif OPR == "=R":
+                item_buy_logic.append(np.isclose(DFIND, REAL))
+            elif OPR == "<R":
+                item_buy_logic.append(DFIND < REAL)
+            dataframe.loc[:, 'buy_zeus_trigger'] = reduce(lambda x, y: x & y, item_buy_logic)
+            conditions.append(dataframe['buy_zeus_trigger'])
         # Buy Condition #1
         # -----------------------------------------------------------------------------------------
         if self.buy_params['buy_condition_1_enable']:
